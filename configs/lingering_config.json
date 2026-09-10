@@ -1,0 +1,8 @@
+{
+  "lingering_threshold": 15,
+  "save_screenshots": true,
+  "alert_sound": true,
+  "min_confidence": 0.5,
+  "target_classes": [0],
+  "max_alerts_history": 100
+}

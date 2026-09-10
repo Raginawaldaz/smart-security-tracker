@@ -1,0 +1,12 @@
+{
+  "polygon_norm": [
+    [0.0, 0.0],
+    [0.5, 0.0],
+    [0.5, 1.0],
+    [0.0, 1.0]
+  ],
+  "homography": null,
+  "ground_polygon": null,
+  "expansion_px": 20,
+  "updated_at": "2026-05-31T00:00:00"
+}
