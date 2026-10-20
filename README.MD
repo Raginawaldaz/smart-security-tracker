@@ -1,174 +1,114 @@
-# YOLOv5 DeepSORT 项目
+# 智能安防追踪系统（smart-security-tracker）
 
-本项目是一个基于 YOLOv5 和 DeepSORT 的多目标跟踪系统，结合了 BoxMOT 库提供的先进跟踪算法，实现了高效、准确的目标检测和跟踪功能。
+基于 **YOLOv8** 检测与 **StrongSORT**（BoxMOT）跟踪的区域逗留报警系统：在可编辑的警戒多边形内统计人员停留时间，超时后截图告警，并通过 Streamlit 后台查看记录、编辑警戒区。
 
-## 📋 项目简介
+Python 包名：`smart_security`。推荐仓库名：`smart-security-tracker`。
 
-该项目利用 YOLOv5 进行目标检测，并使用 DeepSORT 及其变体算法进行目标跟踪，适用于视频监控、交通管理、人流统计等场景。项目集成了 BoxMOT 库，提供了多种先进的跟踪算法选择，如 BoostTrack、BoTSORT、ByteTrack 等。
+## 主要功能
 
-## 🚀 主要功能
+- 摄像头实时检测与多目标跟踪（人员为主）
+- 警戒区多边形热加载（Web 后台拖拽后无需重启监控端）
+- 可选地面单应，用脚的地面投影做区内判定
+- 逗留超时截图告警，JSON / SQLite 落盘
+- Streamlit 仪表板：总览、统计、警戒区编辑、截图清理
 
-- **高效目标检测**：使用 YOLOv5 模型进行实时目标检测
-- **多种跟踪算法**：集成 BoxMOT 库，支持多种 SOTA 跟踪算法
-- **外观特征匹配**：结合 ReID 模型，提高跨帧目标识别准确率
-- **灵活配置**：支持多种模型和参数配置，适应不同场景需求
-- **多源输入**：支持摄像头、视频文件、图片等多种输入源
+## 环境要求
 
-## 🔧 安装说明
+- Python >= 3.10
+- PyTorch（可选 CUDA）
+- 本地 vendored 的 `boxmot/` 目录（不要再 `pip install boxmot`，以免与仓库内代码冲突）
 
-### 环境要求
-- Python >= 3.9
-- PyTorch >= 1.10
-- CUDA 支持（可选，用于 GPU 加速）
-
-### 安装步骤
-
-1. **克隆项目**
-   ```bash
-   git clone https://github.com/yourusername/my_yolov5_deepsort_project.git
-   cd my_yolov5_deepsort_project
-   ```
-
-2. **创建虚拟环境**
-   ```bash
-   python -m venv venv
-   # Windows
-   venv\Scripts\activate
-   # Linux/Mac
-   source venv/bin/activate
-   ```
-
-3. **安装依赖**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **安装 BoxMOT**
-   ```bash
-   pip install boxmot
-   ```
-
-## 💻 使用方法
-
-### 命令行界面
-
-项目提供了基于 BoxMOT 的命令行工具，可用于跟踪、评估和模型导出等操作：
+## 安装
 
 ```bash
-# 运行跟踪
-boxmot track --source 0 --yolo-model yolov5s.pt --tracking-method deepocsort
+git clone https://github.com/Raginawaldaz/smart-security-tracker.git
+cd smart-security-tracker
 
-# 评估跟踪性能
-boxmot eval --yolo-model yolov5s.pt --tracking-method deepocsort --source ./assets/MOT17-mini/train
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# Linux/Mac
+source venv/bin/activate
 
-# 导出 ReID 模型
-boxmot export --weights weights/osnet_x0_25_msmt17.pt --include onnx
+pip install -r requirements.txt
+# 开发 / 测试
+pip install -r requirements-dev.txt
+pre-commit install
 ```
 
-### Python API
+CUDA 版 PyTorch 请按官方指引从对应 index 安装，例如 cu130：
 
-也可以直接在 Python 代码中集成跟踪功能：
-
-```python
-import cv2
-import torch
-import numpy as np
-from pathlib import Path
-from boxmot import DeepOCSort
-from models.common import DetectMultiBackend
-
-# 设置设备
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# 加载 YOLOv5 模型
-model = DetectMultiBackend('yolov5s.pt', device=device)
-
-# 初始化跟踪器
-tracker = DeepOCSort(reid_weights=Path('osnet_x0_25_msmt17.pt'), device=device)
-
-# 开始视频捕获
-cap = cv2.VideoCapture(0)
-
-while True:
-    success, frame = cap.read()
-    if not success:
-        break
-
-    # 运行目标检测
-    results = model(frame)
-    detections = results.pred[0].cpu().numpy()
-    
-    # 过滤低置信度检测结果
-    detections = detections[detections[:, 4] > 0.5]
-    
-    # 更新跟踪器
-    # 输入格式: M X (x, y, x, y, conf, cls)
-    # 输出格式: M X (x, y, x, y, id, conf, cls, ind)
-    tracked_objects = tracker.update(detections, frame)
-    
-    # 绘制跟踪结果
-    tracker.plot_results(frame, show_trajectories=True)
-    
-    # 显示结果
-    cv2.imshow('YOLOv5 DeepSORT Tracking', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# 清理
-cap.release()
-cv2.destroyAllWindows()
+```bash
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
 ```
 
-## 📁 项目结构
+将 `.env.example` 复制为 `.env` 后按需覆盖敏感或部署相关项。非敏感阈值在 `config.yaml`。
 
+权重默认路径：
+
+- 检测：`models/yolov8n.pt`
+- ReID：`weights/osnet_x0_25_msmt17.pt`
+
+## 使用方法
+
+```bash
+# 实时监控（默认摄像头 0）
+python main.py track
+python main.py track --camera 0
+python main.py track --camera path/to/video.mp4
+
+# Streamlit 后台
+python main.py dashboard
+
+# 初始化数据库；示例数据必须显式 --seed
+python main.py init-db
+python main.py init-db --seed
 ```
-my_yolov5_deepsort_project/
-├── boxmot/             # BoxMOT 库
-│   ├── appearance/     # 外观特征提取模型
-│   ├── configs/        # 配置文件
-│   ├── engine/         # 核心引擎
-│   ├── motion/         # 运动模型
-│   └── README.md       # BoxMOT 文档
-├── __pycache__/        # 编译缓存
-├── .venv/              # 虚拟环境
-├── .gitignore          # Git 忽略文件
-└── README.MD           # 项目说明文档
+
+监控窗口快捷键：`q` 退出，`s` 手动截图。
+
+配置加载优先级（高 → 低）：操作系统环境变量 → `.env` → `config.yaml` → 代码默认值。业务代码只从 `get_settings()` 取值。
+
+## 项目结构
+
+```text
+main.py
+src/smart_security/
+  core/           # 配置、数据库、异常
+  modules/
+    tracking/     # 检测、碎片合并、ID 归并、轨迹、主循环
+    zone/         # 警戒区配置与区内判定
+    alarm/        # 逗留状态机与落盘
+    dashboard/    # Streamlit 页面
+  utils/          # 日志、torch 补丁
+tests/
+config.yaml
+.env.example
+boxmot/           # 第三方跟踪库（不随本项目规范改写）
 ```
 
-## 🎯 跟踪算法选择
+## 开发检查
 
-项目支持多种跟踪算法，可根据场景需求选择：
+提交前在项目根目录执行：
 
-| 跟踪算法 | 状态 | HOTA↑ | MOTA↑ | IDF1↑ | FPS |
-| :-----: | :-----: | :---: | :---: | :---: | :---: |
-| boosttrack | ✅ | 69.253 | 75.914 | 83.206 | 25 |
-| botsort | ✅ | 68.885 | 78.222 | 81.344 | 46 |
-| hybridsort | ✅ | 68.216 | 76.382 | 81.164 | 25 |
-| strongsort | ✅ | 68.05 | 76.185 | 80.763 | 17 |
-| deepocsort | ✅ | 67.796 | 75.868 | 80.514 | 12 |
-| bytetrack | ✅ | 67.68 | 78.039 | 79.157 | 1265 |
-| ocsort | ✅ | 66.441 | 74.548 | 77.899 | 1483 |
+```bash
+black .
+ruff check .
+pytest
+```
 
-## 📚 参考资料
+`boxmot/` 已从 Black / Ruff 中排除。
 
-- [BoxMOT: Pluggable SOTA multi-object tracking modules](https://github.com/mikel-brostrom/boxmot)
-- [YOLOv5](https://github.com/ultralytics/yolov5)
-- [DeepSORT](https://github.com/nwojke/deep_sort)
+## 仓库改名
 
-## 🤝 贡献
+若将 GitHub 仓库从 `my_yolov_deepsort_project` 改为 `smart-security-tracker`：在仓库 Settings 中改名后执行
 
-欢迎提交 Issue 和 Pull Request 来改进项目。
+```bash
+git remote set-url origin https://github.com/Raginawaldaz/smart-security-tracker.git
+```
 
-## 📄 许可证
+本项目规范要求使用**私有仓库**托管。
 
-本项目基于 AGPL 3.0 许可证。
+## 许可证
 
-## ⚠️ 项目局限
-
-- **轨迹绘制**：无法准确绘测人物轨迹
-- **3D 识别**：目前无法进行 3D 立体的识别人物
-
-## 📝 使用声明
-
-本项目仅用于学习和实验目的，请勿用于商业用途或其他非法用途。
-
+AGPL-3.0。本项目仅用于学习与实验。
