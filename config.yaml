@@ -1,0 +1,75 @@
+# 非敏感业务配置。敏感凭证请放在 .env，不要写进本文件。
+
+camera:
+  source: 0
+  width: 640
+  height: 480
+  fps: 30
+
+detection:
+  # 主流程实际使用 0.3：略低于 0.5 以便远处/半身目标仍能进入跟踪
+  confidence_threshold: 0.3
+  iou_threshold: 0.48
+  classes: [0]
+  model: models/yolov8n.pt
+
+tracking:
+  max_age: 100
+  min_hits: 3
+  max_iou_dist: 0.7
+  reid_weights: weights/osnet_x0_25_msmt17.pt
+
+alarm:
+  lingering_threshold: 15
+  save_screenshots: true
+  alert_sound: true
+  max_alerts_history: 100
+  screenshot_quality: 85
+  zones_path: data/alarm_zones.json
+
+zone:
+  config_path: data/zone_config.json
+  expansion_px: 20.0
+  in_frames: 4
+  out_frames: 10
+  lower_body_ratio: 0.58
+  score_ema_alpha: 0.38
+  schmitt_high: 0.52
+  schmitt_low: 0.30
+  membership_ttl_frames: 45
+  reload_interval_frames: 15
+
+trajectory:
+  ema_alpha: 0.40
+  min_move_px: 2.0
+  keep_missing: 30
+  max_len: 60
+  anchor_bottom_lift_ratio: 0.12
+  anchor_bottom_lift_min_px: 10.0
+  anchor_lift_max_ratio: 0.38
+
+fragment_merge:
+  vert_iou_min: 0.64
+  x_gap_frac: 0.032
+  x_gap_min_px: 14.0
+  iou_min: 0.10
+  union_wh_max: 0.78
+  width_sim_min: 0.42
+  narrow_strip_ar: 0.42
+
+id_dedup:
+  persist_frames: 3
+  alias_ttl: 150
+
+system:
+  log_level: INFO
+  auto_start: false
+  theme: dark
+
+paths:
+  data_dir: data
+  logs_dir: logs
+  screenshots_dir: data/screenshots
+  alerts_file: data/lingering_alerts.json
+  last_frame: data/last_frame.jpg
+  database: data/database.db
