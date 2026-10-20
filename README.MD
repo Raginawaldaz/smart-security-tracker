@@ -2,7 +2,7 @@
 
 基于 **YOLOv8** 检测与 **StrongSORT**（BoxMOT）跟踪的区域逗留报警系统：在可编辑的警戒多边形内统计人员停留时间，超时后截图告警，并通过 Streamlit 后台查看记录、编辑警戒区。
 
-Python 包名：`smart_security`。推荐仓库名：`smart-security-tracker`。
+Python 包名：`smart_security`。
 
 ## 主要功能
 
@@ -20,8 +20,8 @@ Python 包名：`smart_security`。推荐仓库名：`smart-security-tracker`。
 ## 安装
 
 ```bash
-git clone https://github.com/Raginawaldaz/smart-security-tracker.git
-cd smart-security-tracker
+git clone https://github.com/Raginawaldaz/my_yolov_deepsort_project.git
+cd my_yolov_deepsort_project
 
 python -m venv venv
 # Windows
@@ -96,16 +96,6 @@ pytest
 ```
 
 跟踪算法来自 PyPI 上的 [BoxMOT](https://github.com/mikel-brostrom/boxmot)（`boxmot==15.0.9`），不要再把该仓库整份拷进本项目。
-
-## 仓库改名
-
-若将 GitHub 仓库从 `my_yolov_deepsort_project` 改为 `smart-security-tracker`：在仓库 Settings 中改名后执行
-
-```bash
-git remote set-url origin https://github.com/Raginawaldaz/smart-security-tracker.git
-```
-
-本项目规范要求使用**私有仓库**托管。
 
 ## 许可证
 
