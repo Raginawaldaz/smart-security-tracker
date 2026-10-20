@@ -1,0 +1,61 @@
+[project]
+name = "smart_security"
+version = "0.1.0"
+description = "Zone-based lingering detection with YOLOv8 and StrongSORT"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # 生产依赖以 requirements.txt 为准，保持精确版本锁定
+]
+
+# ==========================================
+# 1. Black 格式化工具配置
+# ==========================================
+[tool.black]
+line-length = 88
+target-version = ['py310']
+include = '\.pyi?$'
+extend-exclude = '''
+(
+  /(
+      \.eggs
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+  )/
+)
+'''
+
+# ==========================================
+# 2. Ruff 静态检查工具配置
+# ==========================================
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B"]
+ignore = [
+    "E501", # 忽略行超长限制（因为已经交给 Black 处理了）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+# ==========================================
+# 3. Pytest 测试框架配置
+# ==========================================
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --cov=smart_security --cov-report=term-missing"
+testpaths = [
+    "tests",
+]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
