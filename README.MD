@@ -66,6 +66,18 @@ python main.py init-db --seed
 
 监控窗口快捷键：`q` 退出，`s` 手动截图。
 
+### 离线评测与跟踪器对比
+
+调参、换跟踪器或换模型前，先在标注视频上跑评测，确认瓶颈在哪里：
+
+```bash
+python scripts/evaluate.py --video eval/videos/a.mp4 --labels eval/a.json --zone eval/a_zone.json
+python scripts/evaluate.py --video eval/videos/a.mp4 --labels eval/a.json \
+    --trackers strongsort botsort deepocsort boosttrack --output reports/a.json
+```
+
+标注格式见 `eval/labels.example.json`：每条事件是一个人在警戒区内的连续停留区间（视频秒）。报告包含报警准确率/召回率/延迟、每个事件内出现的区内 ID 数（大于 1 即 ID 断裂）、重关联与归并次数、处理 FPS 和各阶段耗时。选定的跟踪器写入 `config.yaml` 的 `tracking.tracker`。
+
 配置加载优先级（高 → 低）：操作系统环境变量 → `.env` → `config.yaml` → 代码默认值。业务代码只从 `get_settings()` 取值。
 
 ## 项目结构
@@ -75,11 +87,14 @@ main.py
 src/smart_security/
   core/           # 配置、数据库、异常
   modules/
-    tracking/     # 检测、碎片合并、ID 归并、轨迹、主循环
+    tracking/     # 检测、跟踪器工厂、断链重关联、碎片合并、ID 归并、轨迹、主循环
     zone/         # 警戒区配置与区内判定
     alarm/        # 逗留状态机与落盘
+    evaluation/   # 离线评测指标与执行
     dashboard/    # Streamlit 页面
-  utils/          # 日志、torch 补丁
+  utils/          # 日志、torch 补丁、后台写盘
+scripts/          # 离线评测入口
+eval/             # 标注示例
 tests/
 config.yaml
 .env.example

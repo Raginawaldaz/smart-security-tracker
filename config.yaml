@@ -5,6 +5,8 @@ camera:
   width: 640
   height: 480
   fps: 30
+  # 实时摄像头用独立线程只保留最新帧；视频文件始终逐帧读取，不受此项影响
+  threaded_capture: true
 
 detection:
   # 主流程实际使用 0.3：略低于 0.5 以便远处/半身目标仍能进入跟踪
@@ -14,6 +16,8 @@ detection:
   model: models/yolov8n.pt
 
 tracking:
+  # 可选 strongsort / botsort / deepocsort / boosttrack，用 scripts/evaluate.py 对比后再切换
+  tracker: strongsort
   max_age: 100
   min_hits: 3
   max_iou_dist: 0.7
@@ -21,6 +25,8 @@ tracking:
 
 alarm:
   lingering_threshold: 15
+  # 逗留目标连续未检出超过该秒数才清除；应不小于 relink.max_gap_seconds
+  undetected_timeout_seconds: 5.0
   save_screenshots: true
   alert_sound: true
   max_alerts_history: 100
@@ -30,8 +36,9 @@ alarm:
 zone:
   config_path: data/zone_config.json
   expansion_px: 20.0
-  in_frames: 4
-  out_frames: 10
+  # 进出缓冲按秒计，帧率变化时行为不变
+  in_seconds: 0.15
+  out_seconds: 0.35
   lower_body_ratio: 0.58
   score_ema_alpha: 0.38
   schmitt_high: 0.52
@@ -58,8 +65,20 @@ fragment_merge:
   narrow_strip_ar: 0.42
 
 id_dedup:
-  persist_frames: 3
+  persist_frames: 8
   alias_ttl: 150
+  # ReID 余弦相似度低于此值不合并；已合并的两个 ID 连续 split_frames 帧分离则拆开
+  min_similarity: 0.5
+  split_frames: 10
+
+relink:
+  enabled: true
+  max_gap_seconds: 5.0
+  min_similarity: 0.65
+  # 距离以人框高度为单位：允许 max_dist_ratio + max_speed_ratio * 间隔秒数
+  max_dist_ratio: 0.6
+  max_speed_ratio: 1.0
+  feature_ema: 0.8
 
 system:
   log_level: INFO

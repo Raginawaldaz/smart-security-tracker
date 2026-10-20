@@ -29,6 +29,7 @@ ENV_OVERRIDES: dict[str, str] = {
     "DETECTION_CONFIDENCE_THRESHOLD": "detection.confidence_threshold",
     "DETECTION_IOU_THRESHOLD": "detection.iou_threshold",
     "YOLO_MODEL_PATH": "detection.model",
+    "TRACKER_TYPE": "tracking.tracker",
     "TRACKING_MAX_AGE": "tracking.max_age",
     "TRACKING_MIN_HITS": "tracking.min_hits",
     "REID_WEIGHTS_PATH": "tracking.reid_weights",
@@ -47,6 +48,7 @@ class CameraSettings:
     width: int = 640
     height: int = 480
     fps: int = 30
+    threaded_capture: bool = True
 
 
 @dataclass
@@ -59,6 +61,7 @@ class DetectionSettings:
 
 @dataclass
 class TrackingSettings:
+    tracker: str = "strongsort"
     max_age: int = 100
     min_hits: int = 3
     max_iou_dist: float = 0.7
@@ -68,6 +71,7 @@ class TrackingSettings:
 @dataclass
 class AlarmSettings:
     lingering_threshold: float = 15.0
+    undetected_timeout_seconds: float = 5.0
     save_screenshots: bool = True
     alert_sound: bool = True
     max_alerts_history: int = 100
@@ -79,8 +83,8 @@ class AlarmSettings:
 class ZoneSettings:
     config_path: str = "data/zone_config.json"
     expansion_px: float = 20.0
-    in_frames: int = 4
-    out_frames: int = 10
+    in_seconds: float = 0.15
+    out_seconds: float = 0.35
     lower_body_ratio: float = 0.58
     score_ema_alpha: float = 0.38
     schmitt_high: float = 0.52
@@ -113,8 +117,20 @@ class FragmentMergeSettings:
 
 @dataclass
 class IdDedupSettings:
-    persist_frames: int = 3
+    persist_frames: int = 8
     alias_ttl: int = 150
+    min_similarity: float = 0.5
+    split_frames: int = 10
+
+
+@dataclass
+class RelinkSettings:
+    enabled: bool = True
+    max_gap_seconds: float = 5.0
+    min_similarity: float = 0.65
+    max_dist_ratio: float = 0.6
+    max_speed_ratio: float = 1.0
+    feature_ema: float = 0.8
 
 
 @dataclass
@@ -144,6 +160,7 @@ class Settings:
     trajectory: TrajectorySettings = field(default_factory=TrajectorySettings)
     fragment_merge: FragmentMergeSettings = field(default_factory=FragmentMergeSettings)
     id_dedup: IdDedupSettings = field(default_factory=IdDedupSettings)
+    relink: RelinkSettings = field(default_factory=RelinkSettings)
     system: SystemSettings = field(default_factory=SystemSettings)
     paths: PathSettings = field(default_factory=PathSettings)
 

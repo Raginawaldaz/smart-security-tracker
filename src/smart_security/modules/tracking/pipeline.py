@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -14,6 +15,13 @@ from smart_security.core.exceptions import CameraError
 from smart_security.modules.alarm.alert_store import AlertStore
 from smart_security.modules.alarm.constants import LINGER_LABEL_MIN_SECONDS
 from smart_security.modules.alarm.lingering import LingeringDetector
+from smart_security.modules.alarm.schemas import AlertRecord
+from smart_security.modules.tracking.capture import LatestFrameCapture
+from smart_security.modules.tracking.clock import (
+    FrameClock,
+    VideoTimeline,
+    is_file_source,
+)
 from smart_security.modules.tracking.constants import (
     FPS_BUFFER_SIZE,
     HUD_GREEN,
@@ -30,39 +38,57 @@ from smart_security.modules.tracking.constants import (
     ZONE_OVERLAY_BASE,
     get_class_color,
 )
-from smart_security.modules.tracking.detector import (
-    YoloDetector,
-    build_strongsort,
-    select_device,
-)
+from smart_security.modules.tracking.detector import YoloDetector, select_device
 from smart_security.modules.tracking.fragment_merge import (
     merge_fragment_person_detections,
 )
 from smart_security.modules.tracking.id_dedup import TrackIdDeduplicator
+from smart_security.modules.tracking.relink import TrackRelinker
+from smart_security.modules.tracking.tracker_factory import (
+    build_appearance_encoder,
+    build_tracker,
+)
 from smart_security.modules.tracking.trajectory import TrajectoryStore
 from smart_security.modules.zone.membership import ZoneMembership
 from smart_security.modules.zone.zone_config import ZoneConfig
+from smart_security.utils.background import BackgroundWriter
 from smart_security.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 MIN_POLYGON_POINTS = 3
+DETECTION_COLUMNS = 6
+DET_INDEX_COLUMN = 7
 
 
 class TrackingPipeline:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        tracker_name: str | None = None,
+        alert_store: AlertStore | None = None,
+        zone_path: Path | None = None,
+        save_preview: bool = True,
+    ) -> None:
         self.settings = get_settings()
         self.device = select_device()
         logger.info("Using device: %s", self.device)
 
-        self.zone = ZoneConfig()
+        self.clock = FrameClock()
+        self.writer = BackgroundWriter()
+        self.save_preview = save_preview
+        self.zone = ZoneConfig(path=zone_path)
         self.membership = ZoneMembership(self.zone)
         self.trajectories = TrajectoryStore()
+        self.relinker = TrackRelinker()
         self.dedup = TrackIdDeduplicator()
         self.detector = YoloDetector(self.settings)
-        self.tracker = build_strongsort(self.device, self.settings)
-        self.alert_store = AlertStore()
-        self.lingering = LingeringDetector(self.alert_store, time.time)
+        self.tracker_name = tracker_name or self.settings.tracking.tracker
+        self.tracker = build_tracker(self.tracker_name, self.device, self.settings)
+        self.encoder = build_appearance_encoder(
+            self.tracker, self.device, self.settings
+        )
+        self.alert_store = alert_store or AlertStore(writer=self.writer)
+        self.lingering = LingeringDetector(self.alert_store, self.clock)
 
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.screenshots_dir = self.settings.screenshots_dir
@@ -70,6 +96,12 @@ class TrackingPipeline:
 
         self.frame_count = 0
         self.start_time = time.time()
+        self.last_tracked: list[list[float]] = []
+        self.last_alerts: list[AlertRecord] = []
+        self.last_timings: dict[str, float] = {}
+
+    def close(self) -> None:
+        self.writer.close()
 
     def draw_detection_zone(self, frame: np.ndarray) -> None:
         height, width = frame.shape[:2]
@@ -106,7 +138,7 @@ class TrackingPipeline:
         )
 
     def draw_lingering_info(self, frame: np.ndarray) -> None:
-        current_time = time.time()
+        current_time = self.clock()
         for track_id, info in self.lingering.lingering_targets.items():
             linger_time = current_time - info["enter_time"]
             if linger_time <= LINGER_LABEL_MIN_SECONDS:
@@ -181,11 +213,18 @@ class TrackingPipeline:
                 frame, text, (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1
             )
 
-    def _save_preview_frame(self, frame: np.ndarray) -> None:
+    @staticmethod
+    def _write_image(path: Path, frame: np.ndarray) -> None:
         try:
-            cv2.imwrite(str(self.settings.last_frame_path), frame)
+            if not cv2.imwrite(str(path), frame):
+                logger.warning("Failed to write image: %s", path)
         except cv2.error as exc:
-            logger.warning("Failed to write preview frame: %s", exc)
+            logger.warning("Failed to write image %s: %s", path, exc)
+
+    def _save_preview_frame(self, frame: np.ndarray) -> None:
+        self.writer.submit(
+            self._write_image, self.settings.last_frame_path, frame.copy()
+        )
 
     def _draw_tracks(self, frame: np.ndarray, tracked: list[Any]) -> None:
         for obj in tracked:
@@ -211,7 +250,59 @@ class TrackingPipeline:
                 2,
             )
 
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def _features_by_track(
+        self, rows: list[list[float]], embeddings: np.ndarray | None
+    ) -> dict[int, np.ndarray]:
+        if embeddings is None:
+            return {}
+        features: dict[int, np.ndarray] = {}
+        for row in rows:
+            if len(row) <= DET_INDEX_COLUMN:
+                continue
+            index = int(row[DET_INDEX_COLUMN])
+            if 0 <= index < len(embeddings):
+                features[int(row[4])] = embeddings[index]
+        return features
+
+    def _track(
+        self,
+        detections: list[list[float]],
+        frame: np.ndarray,
+        now: float,
+        timings: dict[str, float],
+    ) -> list[list[float]]:
+        """无检测的帧也要喂给跟踪器，卡尔曼预测和 max_age 计数才会推进。"""
+        frame_height, frame_width = frame.shape[:2]
+        det_array = np.asarray(detections, dtype=np.float64).reshape(
+            -1, DETECTION_COLUMNS
+        )
+        try:
+            started = time.perf_counter()
+            embeddings = (
+                self.encoder.encode(det_array[:, :4], frame)
+                if self.encoder is not None
+                else None
+            )
+            timings["reid"] = time.perf_counter() - started
+            started = time.perf_counter()
+            output = np.asarray(self.tracker.update(det_array, frame, embeddings))
+            timings["track"] = time.perf_counter() - started
+        except (RuntimeError, ValueError, TypeError) as exc:
+            logger.exception("Tracking error: %s", exc)
+            return []
+
+        rows = output.tolist() if output.ndim == 2 else []
+        features = self._features_by_track(rows, embeddings)
+        rows, features = self.relinker.apply(rows, now, features)
+        return self.dedup.apply(
+            rows, frame_width, frame_height, self.frame_count, features
+        )
+
+    def process_frame(
+        self, frame: np.ndarray, timestamp: float | None = None
+    ) -> np.ndarray:
+        """timestamp 为视频秒；None 表示实时流，用墙钟。"""
+        now = self.clock.tick(timestamp)
         self.frame_count += 1
         frame_height, frame_width = frame.shape[:2]
         self.membership.set_frame_size(frame_width, frame_height)
@@ -219,31 +310,33 @@ class TrackingPipeline:
         if self.frame_count % self.settings.zone.reload_interval_frames == 0:
             if self.zone.load():
                 logger.info("警戒区配置已更新")
-            self._save_preview_frame(frame)
+            if self.save_preview:
+                self._save_preview_frame(frame)
 
-        self.draw_detection_zone(frame)
+        # 检测与 ReID 必须在画叠加层之前完成，否则区域着色和文字会污染模型输入。
+        timings: dict[str, float] = {}
+        started = time.perf_counter()
         detections = self.detector.detect(frame)
         detections = merge_fragment_person_detections(
             detections, frame_width, frame_height
         )
+        timings["detect"] = time.perf_counter() - started
+        tracked = self._track(detections, frame, now, timings)
 
-        if detections:
-            try:
-                tracked = self.tracker.update(np.array(detections), frame)
-                tracked = self.dedup.apply(
-                    tracked, frame_width, frame_height, self.frame_count
-                )
-                self.membership.update(tracked, self.frame_count)
-                self.trajectories.update(tracked)
-                self.lingering.check(tracked, frame, self.membership.is_in_zone)
-                self._draw_tracks(frame, tracked)
-            except (RuntimeError, ValueError, TypeError) as exc:
-                logger.exception("Tracking error: %s", exc)
-        else:
-            self.trajectories.update([])
-
+        started = time.perf_counter()
+        self.membership.update(tracked, self.frame_count)
+        self.trajectories.update(tracked)
+        self.draw_detection_zone(frame)
+        self.last_alerts = self.lingering.check(
+            tracked, frame, self.membership.is_in_zone
+        )
+        self._draw_tracks(frame, tracked)
         self.trajectories.draw(frame, self.membership.is_in_zone)
         self.draw_lingering_info(frame)
+        timings["logic"] = time.perf_counter() - started
+
+        self.last_tracked = tracked
+        self.last_timings = timings
         return frame
 
     def run(self, camera_id: int | str | None = None) -> None:
@@ -252,18 +345,48 @@ class TrackingPipeline:
         if not cap.isOpened():
             raise CameraError(f"Cannot open camera: {source}")
 
-        ret, first_frame = cap.read()
-        if not ret:
-            cap.release()
+        timeline = (
+            VideoTimeline(cap.get(cv2.CAP_PROP_FPS)) if is_file_source(source) else None
+        )
+        reader = (
+            LatestFrameCapture(cap)
+            if timeline is None and self.settings.camera.threaded_capture
+            else cap
+        )
+        try:
+            self._run_loop(cap, reader, timeline)
+        finally:
+            reader.release()
+            cv2.destroyAllWindows()
+            self.close()
+            total_time = time.time() - self.start_time
+            avg = self.frame_count / total_time if total_time > 0 else 0.0
+            logger.info(
+                "Final stats — frames: %s | avg FPS: %.1f", self.frame_count, avg
+            )
+            logger.info("System shutdown complete")
+
+    def _run_loop(
+        self,
+        cap: cv2.VideoCapture,
+        reader: cv2.VideoCapture | LatestFrameCapture,
+        timeline: VideoTimeline | None,
+    ) -> None:
+        ret, first_frame = reader.read()
+        if not ret or first_frame is None:
             raise CameraError("Cannot read camera frame")
+        if timeline is not None:
+            timeline.next(cap.get(cv2.CAP_PROP_POS_MSEC))
 
         height, width = first_frame.shape[:2]
         self.membership.set_frame_size(width, height)
-        self._save_preview_frame(first_frame)
+        if self.save_preview:
+            self._save_preview_frame(first_frame)
         logger.info(
-            "Zone polygon points: %s | ground-homography: %s",
+            "Zone polygon points: %s | ground-homography: %s | time base: %s",
             len(self.zone.polygon_norm),
             "on" if self.zone.homography is not None else "off",
+            "video timestamps" if timeline is not None else "wall clock",
         )
         logger.info(
             "Starting real-time monitoring — press 'q' to quit, 's' to screenshot"
@@ -272,39 +395,36 @@ class TrackingPipeline:
         prev_time = time.time()
         fps_buffer: list[float] = []
 
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Frame read error")
-                    break
-
-                current_time = time.time()
-                delta = current_time - prev_time
-                if delta > 0:
-                    fps_buffer.append(1.0 / delta)
-                    if len(fps_buffer) > FPS_BUFFER_SIZE:
-                        fps_buffer.pop(0)
-                prev_time = current_time
-                avg_fps = float(np.mean(fps_buffer)) if fps_buffer else 0.0
-
-                frame = self.process_frame(frame)
-                self._draw_hud(frame, avg_fps)
-                cv2.imshow("Smart Security - Zone-Based Lingering Alert", frame)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == QUIT_KEY:
-                    break
-                if key == SCREENSHOT_KEY:
-                    filename = f"manual_screenshot_{int(time.time())}.jpg"
-                    cv2.imwrite(str(self.screenshots_dir / filename), frame)
-                    logger.info("Screenshot saved: %s", filename)
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-            total_time = time.time() - self.start_time
-            avg = self.frame_count / total_time if total_time > 0 else 0.0
-            logger.info(
-                "Final stats — frames: %s | avg FPS: %.1f", self.frame_count, avg
+        while True:
+            ret, frame = reader.read()
+            if not ret or frame is None:
+                logger.warning("Frame read error")
+                break
+            timestamp = (
+                timeline.next(cap.get(cv2.CAP_PROP_POS_MSEC))
+                if timeline is not None
+                else None
             )
-            logger.info("System shutdown complete")
+
+            current_time = time.time()
+            delta = current_time - prev_time
+            if delta > 0:
+                fps_buffer.append(1.0 / delta)
+                if len(fps_buffer) > FPS_BUFFER_SIZE:
+                    fps_buffer.pop(0)
+            prev_time = current_time
+            avg_fps = float(np.mean(fps_buffer)) if fps_buffer else 0.0
+
+            frame = self.process_frame(frame, timestamp)
+            self._draw_hud(frame, avg_fps)
+            cv2.imshow("Smart Security - Zone-Based Lingering Alert", frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == QUIT_KEY:
+                break
+            if key == SCREENSHOT_KEY:
+                filename = f"manual_screenshot_{int(time.time())}.jpg"
+                self.writer.submit(
+                    self._write_image, self.screenshots_dir / filename, frame
+                )
+                logger.info("Screenshot queued: %s", filename)

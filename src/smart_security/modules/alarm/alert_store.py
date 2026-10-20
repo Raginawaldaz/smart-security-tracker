@@ -14,6 +14,7 @@ from smart_security.core.config import get_settings
 from smart_security.core.exceptions import AlertStoreError
 from smart_security.modules.alarm.constants import AlarmType
 from smart_security.modules.alarm.schemas import AlertRecord
+from smart_security.utils.background import BackgroundWriter
 from smart_security.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,8 +25,11 @@ class AlertStore:
         self,
         screenshots_dir: Path | None = None,
         alerts_file: Path | None = None,
+        writer: BackgroundWriter | None = None,
+        save_screenshots: bool | None = None,
     ) -> None:
         settings = get_settings()
+        self._writer = writer
         self.screenshots_dir = (
             Path(screenshots_dir)
             if screenshots_dir is not None
@@ -35,17 +39,26 @@ class AlertStore:
             Path(alerts_file) if alerts_file is not None else settings.alerts_file
         )
         self.max_history = settings.alarm.max_alerts_history
-        self.save_screenshots = settings.alarm.save_screenshots
+        self.save_screenshots = (
+            save_screenshots
+            if save_screenshots is not None
+            else settings.alarm.save_screenshots
+        )
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.alerts_file.parent.mkdir(parents=True, exist_ok=True)
 
     def save_lingering_alert(
         self, track_id: int, linger_time: float, frame: np.ndarray
     ) -> AlertRecord:
+        """
+        记录立即返回；配置了 writer 时截图与 JSON 在后台线程落盘，
+        失败只记日志，不再向主循环抛 AlertStoreError。
+        """
         timestamp = datetime.now()
         filename = f"lingering_{track_id}_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
         filepath = self.screenshots_dir / filename
 
+        alert_frame: np.ndarray | None = None
         if self.save_screenshots:
             alert_frame = frame.copy()
             cv2.putText(
@@ -66,9 +79,6 @@ class AlertStore:
                 (0, 0, 255),
                 1,
             )
-            written = cv2.imwrite(str(filepath), alert_frame)
-            if not written:
-                raise AlertStoreError(f"Failed to write screenshot: {filepath}")
 
         record = AlertRecord(
             timestamp=timestamp.isoformat(),
@@ -77,8 +87,20 @@ class AlertStore:
             screenshot=str(filepath),
             type=AlarmType.LINGERING.value,
         )
-        self._append_record(record)
+        if self._writer is not None:
+            self._writer.submit(self._persist, record, alert_frame, filepath)
+        else:
+            self._persist(record, alert_frame, filepath)
         return record
+
+    def _persist(
+        self, record: AlertRecord, alert_frame: np.ndarray | None, filepath: Path
+    ) -> None:
+        if alert_frame is not None:
+            written = cv2.imwrite(str(filepath), alert_frame)
+            if not written:
+                raise AlertStoreError(f"Failed to write screenshot: {filepath}")
+        self._append_record(record)
 
     def _append_record(self, record: AlertRecord) -> None:
         alerts: list[dict] = []

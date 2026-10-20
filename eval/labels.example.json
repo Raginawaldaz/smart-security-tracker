@@ -1,0 +1,7 @@
+{
+  "video": "eval/videos/entrance_occlusion.mp4",
+  "events": [
+    { "start": 4.0, "end": 31.5, "note": "person A stands at the door, briefly occluded around 18s" },
+    { "start": 40.0, "end": 47.0, "note": "person B walks through, should not alarm" }
+  ]
+}

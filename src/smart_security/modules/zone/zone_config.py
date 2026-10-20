@@ -21,10 +21,13 @@ DEFAULT_EXPANSION_PX = 20.0
 MIN_POLYGON_POINTS = 3
 HOMOGRAPHY_SHAPE = (3, 3)
 GROUND_W_EPSILON = 1e-9
-CENTROID_NORM_EPSILON = 1e-6
 DEFAULT_LOWER_BAND = 0.58
 DEFAULT_GRID_X = 5
 DEFAULT_GRID_Y = 4
+GROUND_CONTACT_BAND = 0.08
+GROUND_CONTACT_ROWS = 2
+MASK_INSIDE = 255
+MAX_PROJECTED_COORD = 1e6
 
 
 def default_polygon_norm() -> list[list[float]]:
@@ -41,6 +44,8 @@ class ZoneConfig:
         self.ground_polygon: np.ndarray | None = None
         self.expansion_px: float = float(settings.zone.expansion_px)
         self._mtime: float | None = None
+        self._cached_mask: np.ndarray | None = None
+        self._cached_mask_key: tuple | None = None
         self.load(force=True)
 
     def load(self, force: bool = False) -> bool:
@@ -114,53 +119,112 @@ class ZoneConfig:
             dtype=np.float32,
         )
 
-    def _expanded_image_polygon(self, width: int, height: int) -> np.ndarray:
-        """围绕质心向外扩 expansion_px，缓解边界抖动。"""
-        polygon = self.image_polygon(width, height)
-        if self.expansion_px <= 0 or len(polygon) < MIN_POLYGON_POINTS:
-            return polygon
-        centroid = polygon.mean(axis=0)
-        expanded: list[np.ndarray] = []
-        for point in polygon:
-            vector = point - centroid
-            norm = float(np.hypot(vector[0], vector[1]))
-            if norm < CENTROID_NORM_EPSILON:
-                expanded.append(point)
-            else:
-                expanded.append(point + vector / norm * self.expansion_px)
-        return np.array(expanded, dtype=np.float32)
+    @property
+    def uses_ground_plane(self) -> bool:
+        return self.homography is not None and self.ground_polygon is not None
 
-    def _to_ground(self, pixel_x: float, pixel_y: float) -> tuple[float, float] | None:
-        if self.homography is None:
+    def _mask_key(self, width: int, height: int) -> tuple:
+        return (
+            int(width),
+            int(height),
+            tuple(tuple(point) for point in self.polygon_norm),
+            float(self.expansion_px),
+            None if self.homography is None else self.homography.tobytes(),
+            None if self.ground_polygon is None else self.ground_polygon.tobytes(),
+        )
+
+    def region_mask(self, width: int, height: int) -> np.ndarray | None:
+        """
+        当前分辨率下的警戒区掩码（非零即区内），配置或尺寸变化时才重建。
+        地面多边形跨过地平线、无法映射回图像多边形时返回 None，改走逐点投影。
+        """
+        key = self._mask_key(width, height)
+        if key != self._cached_mask_key:
+            self._cached_mask = self._build_mask(int(width), int(height))
+            self._cached_mask_key = key
+        return self._cached_mask
+
+    def _build_mask(self, width: int, height: int) -> np.ndarray | None:
+        mask = np.zeros((height, width), dtype=np.uint8)
+        if self.uses_ground_plane:
+            polygon = self._ground_polygon_in_image()
+            if polygon is None:
+                return None
+            cv2.fillPoly(mask, [polygon], MASK_INSIDE)
+            return mask
+
+        polygon = np.rint(self.image_polygon(width, height)).astype(np.int32)
+        if len(polygon) < MIN_POLYGON_POINTS:
+            return mask
+        cv2.fillPoly(mask, [polygon], MASK_INSIDE)
+        # 掩码膨胀等价于多边形各边等距外扩，凹多边形也不会变形。
+        radius = int(round(self.expansion_px))
+        if radius > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+            )
+            mask = cv2.dilate(mask, kernel)
+        return mask
+
+    def _ground_polygon_in_image(self) -> np.ndarray | None:
+        """地面多边形经单应逆变换回图像；所有顶点在地平线同侧时映射保持为多边形。"""
+        try:
+            inverse = np.linalg.inv(self.homography)
+        except np.linalg.LinAlgError:
             return None
-        vector = self.homography @ np.array([pixel_x, pixel_y, 1.0], dtype=np.float64)
-        if abs(vector[2]) < GROUND_W_EPSILON:
+        ground = np.asarray(self.ground_polygon, dtype=np.float64)
+        homogeneous = np.column_stack((ground, np.ones(len(ground)))) @ inverse.T
+        scale = homogeneous[:, 2]
+        if np.any(np.abs(scale) < GROUND_W_EPSILON):
             return None
-        return float(vector[0] / vector[2]), float(vector[1] / vector[2])
+        if not (np.all(scale > 0) or np.all(scale < 0)):
+            return None
+        image = homogeneous[:, :2] / scale[:, None]
+        if np.abs(image).max() > MAX_PROJECTED_COORD:
+            return None
+        return np.rint(image).astype(np.int32)
+
+    def _points_in_ground(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        pixels = np.column_stack((xs, ys, np.ones(len(xs))))
+        projected = pixels @ np.asarray(self.homography, dtype=np.float64).T
+        ground_poly = self.ground_polygon.astype(np.float32).reshape(-1, 1, 2)
+        inside = np.zeros(len(xs), dtype=bool)
+        for index, (gx, gy, gw) in enumerate(projected):
+            if abs(gw) < GROUND_W_EPSILON:
+                continue
+            inside[index] = (
+                cv2.pointPolygonTest(
+                    ground_poly, (float(gx / gw), float(gy / gw)), False
+                )
+                >= 0
+            )
+        return inside
+
+    def points_in_zone(
+        self, xs: np.ndarray, ys: np.ndarray, width: int, height: int
+    ) -> np.ndarray:
+        """
+        批量判断像素点是否在警戒区内。
+        - 若配置了 homography + ground_polygon：按地面坐标判断（接近 3D），不做外扩。
+        - 否则：图像空间多边形（含外扩）内判断。
+        画面外的点按最近的边缘像素判断。
+        """
+        xs = np.asarray(xs, dtype=np.float64).ravel()
+        ys = np.asarray(ys, dtype=np.float64).ravel()
+        mask = self.region_mask(width, height)
+        if mask is None:
+            return self._points_in_ground(xs, ys)
+        cols = np.clip(np.rint(xs).astype(np.int64), 0, int(width) - 1)
+        rows = np.clip(np.rint(ys).astype(np.int64), 0, int(height) - 1)
+        return mask[rows, cols] > 0
 
     def point_in_zone(
         self, pixel_x: float, pixel_y: float, width: int, height: int
     ) -> bool:
-        """
-        判断像素点是否在警戒区内。
-        - 若配置了 homography + ground_polygon：投影到地面坐标后判断（接近 3D）。
-        - 否则：图像空间多边形（含外扩）内判断。
-        """
-        if self.homography is not None and self.ground_polygon is not None:
-            ground_point = self._to_ground(pixel_x, pixel_y)
-            if ground_point is None:
-                return False
-            ground_poly = self.ground_polygon.astype(np.float32).reshape(-1, 1, 2)
-            return (
-                cv2.pointPolygonTest(
-                    ground_poly, (float(ground_point[0]), float(ground_point[1])), False
-                )
-                >= 0
-            )
-
-        polygon = self._expanded_image_polygon(width, height).reshape(-1, 1, 2)
-        return (
-            cv2.pointPolygonTest(polygon, (float(pixel_x), float(pixel_y)), False) >= 0
+        return bool(
+            self.points_in_zone(
+                np.array([pixel_x]), np.array([pixel_y]), width, height
+            )[0]
         )
 
     def coverage_ratio(
@@ -178,16 +242,17 @@ class ZoneConfig:
         """
         采样 bbox 下半身带的网格点，统计落在区域内的比例（0~1）。
         只有手臂伸进区时下半身带几乎不在区内 → 比例低；半身进入 → 比例显著升高。
+        地面单应只对接触地面的点成立，该模式下只采样框底附近的窄带。
         """
         box_height = max(float(y2) - float(y1), 1.0)
-        top = float(y1) + (1.0 - lower_band) * box_height
+        if self.uses_ground_plane:
+            top = float(y2) - GROUND_CONTACT_BAND * box_height
+            rows = GROUND_CONTACT_ROWS
+        else:
+            top = float(y1) + (1.0 - lower_band) * box_height
+            rows = grid_y
         xs = np.linspace(float(x1) + 1, float(x2) - 1, grid_x)
-        ys = np.linspace(top + 1, float(y2) - 1, grid_y)
-        total = 0
-        inside = 0
-        for sample_y in ys:
-            for sample_x in xs:
-                total += 1
-                if self.point_in_zone(sample_x, sample_y, width, height):
-                    inside += 1
-        return inside / max(total, 1)
+        ys = np.linspace(top + 1, float(y2) - 1, rows)
+        grid_xs, grid_ys = np.meshgrid(xs, ys)
+        inside = self.points_in_zone(grid_xs, grid_ys, width, height)
+        return float(inside.mean()) if inside.size else 0.0
