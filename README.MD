@@ -20,8 +20,8 @@ Python 包名：`smart_security`。
 ## 安装
 
 ```bash
-git clone https://github.com/Raginawaldaz/my_yolov_deepsort_project.git
-cd my_yolov_deepsort_project
+git clone https://github.com/Raginawaldaz/smart-security-tracker.git
+cd smart-security-tracker
 
 python -m venv venv
 # Windows

@@ -3,6 +3,7 @@ name = "smart_security"
 version = "0.1.0"
 description = "Zone-based lingering detection with YOLOv8 and StrongSORT"
 readme = "README.md"
+authors = [{ name = "Reynolds" }]
 requires-python = ">=3.10"
 dependencies = [
     # 生产依赖以 requirements.txt 为准，保持精确版本锁定
