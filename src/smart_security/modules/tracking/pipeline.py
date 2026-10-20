@@ -105,7 +105,7 @@ class TrackingPipeline:
 
     def draw_detection_zone(self, frame: np.ndarray) -> None:
         height, width = frame.shape[:2]
-        polygon = self.zone.image_polygon(width, height).astype(np.int32)
+        polygon = np.rint(self.zone.overlay_polygon(width, height)).astype(np.int32)
         if len(polygon) < MIN_POLYGON_POINTS:
             return
         overlay = frame.copy()
@@ -113,11 +113,7 @@ class TrackingPipeline:
         cv2.addWeighted(overlay, ZONE_OVERLAY_ALPHA, frame, ZONE_OVERLAY_BASE, 0, frame)
         cv2.polylines(frame, [polygon], True, ZONE_FILL_COLOR, 3, cv2.LINE_AA)
         text_x, text_y = int(polygon[:, 0].min()), int(polygon[:, 1].min())
-        tag = (
-            "DETECTION ZONE (3D)"
-            if self.zone.homography is not None
-            else "DETECTION ZONE"
-        )
+        tag = "ZONE (GROUND 3D)" if self.zone.uses_ground_plane else "DETECTION ZONE"
         cv2.putText(
             frame,
             tag,
@@ -385,7 +381,7 @@ class TrackingPipeline:
         logger.info(
             "Zone polygon points: %s | ground-homography: %s | time base: %s",
             len(self.zone.polygon_norm),
-            "on" if self.zone.homography is not None else "off",
+            "on" if self.zone.uses_ground_plane else "off",
             "video timestamps" if timeline is not None else "wall clock",
         )
         logger.info(
