@@ -71,7 +71,7 @@ def build_strongsort(device: torch.device, settings: Settings | None = None):
         from boxmot import StrongSort
     except ImportError as exc:
         raise ModelLoadError(
-            "boxmot is not importable; add the vendored boxmot/ to PYTHONPATH"
+            "boxmot is not installed; run pip install -r requirements.txt"
         ) from exc
 
     reid_path = cfg.reid_weights_path

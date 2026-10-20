@@ -16,7 +16,6 @@ Python 包名：`smart_security`。推荐仓库名：`smart-security-tracker`。
 
 - Python >= 3.10
 - PyTorch（可选 CUDA）
-- 本地 vendored 的 `boxmot/` 目录（不要再 `pip install boxmot`，以免与仓库内代码冲突）
 
 ## 安装
 
@@ -84,7 +83,6 @@ src/smart_security/
 tests/
 config.yaml
 .env.example
-boxmot/           # 第三方跟踪库（不随本项目规范改写）
 ```
 
 ## 开发检查
@@ -97,7 +95,7 @@ ruff check .
 pytest
 ```
 
-`boxmot/` 已从 Black / Ruff 中排除。
+跟踪算法来自 PyPI 上的 [BoxMOT](https://github.com/mikel-brostrom/boxmot)（`boxmot==15.0.9`），不要再把该仓库整份拷进本项目。
 
 ## 仓库改名
 

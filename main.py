@@ -11,17 +11,16 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_DIR = PROJECT_ROOT / "src"
-BOXMOT_DIR = PROJECT_ROOT / "boxmot"
 
 
 def _bootstrap_path() -> None:
-    for path in (str(SRC_DIR), str(BOXMOT_DIR), str(PROJECT_ROOT)):
+    for path in (str(SRC_DIR), str(PROJECT_ROOT)):
         if path not in sys.path:
             sys.path.insert(0, path)
 
 
 def _pythonpath() -> str:
-    parts = [str(SRC_DIR), str(BOXMOT_DIR), str(PROJECT_ROOT)]
+    parts = [str(SRC_DIR), str(PROJECT_ROOT)]
     existing = os.environ.get("PYTHONPATH", "")
     if existing:
         parts.append(existing)
