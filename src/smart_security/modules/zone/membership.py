@@ -14,6 +14,8 @@ from smart_security.modules.zone.zone_config import ZoneConfig
 
 FOOT_SCORE_WEIGHT = 0.45
 COVERAGE_SCORE_WEIGHT = 0.55
+GROUND_FOOT_SCORE_WEIGHT = 0.78
+GROUND_COVERAGE_SCORE_WEIGHT = 0.22
 COVERAGE_SOFTMAX_SCALE = 0.6
 
 
@@ -35,6 +37,7 @@ class ZoneMembership:
     def set_frame_size(self, width: int, height: int) -> None:
         self.frame_width = width
         self.frame_height = height
+        self.zone.ensure_ground_mapping(width, height)
 
     def geometry_score(
         self, x1: float, y1: float, x2: float, y2: float
@@ -53,9 +56,14 @@ class ZoneMembership:
             height,
             lower_band=self.lower_body_ratio,
         )
-        score = FOOT_SCORE_WEIGHT * (
-            1.0 if foot_in else 0.0
-        ) + COVERAGE_SCORE_WEIGHT * float(
+        if self.zone.uses_ground_plane:
+            foot_weight, cover_weight = (
+                GROUND_FOOT_SCORE_WEIGHT,
+                GROUND_COVERAGE_SCORE_WEIGHT,
+            )
+        else:
+            foot_weight, cover_weight = FOOT_SCORE_WEIGHT, COVERAGE_SCORE_WEIGHT
+        score = foot_weight * (1.0 if foot_in else 0.0) + cover_weight * float(
             np.clip(cover / COVERAGE_SOFTMAX_SCALE, 0.0, 1.0)
         )
         return float(np.clip(score, 0.0, 1.0)), bool(foot_in)

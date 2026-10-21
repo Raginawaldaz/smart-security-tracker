@@ -13,6 +13,14 @@ import numpy as np
 
 from smart_security.core.config import get_settings
 from smart_security.core.exceptions import ZoneConfigError
+from smart_security.modules.zone.camera import (
+    DEFAULT_HEIGHT_M,
+    DEFAULT_HFOV_DEG,
+    DEFAULT_PITCH_DEG,
+    DEFAULT_ROLL_DEG,
+    image_to_ground_homography,
+    project_pixels_to_ground,
+)
 from smart_security.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,10 +50,16 @@ class ZoneConfig:
         self.polygon_norm: list[list[float]] = default_polygon_norm()
         self.homography: np.ndarray | None = None
         self.ground_polygon: np.ndarray | None = None
+        self.ground_source: str = "off"
+        self.camera_height_m: float = DEFAULT_HEIGHT_M
+        self.pitch_deg: float = DEFAULT_PITCH_DEG
+        self.hfov_deg: float = DEFAULT_HFOV_DEG
+        self.roll_deg: float = DEFAULT_ROLL_DEG
         self.expansion_px: float = float(settings.zone.expansion_px)
         self._mtime: float | None = None
         self._cached_mask: np.ndarray | None = None
         self._cached_mask_key: tuple | None = None
+        self._mapped_size: tuple[int, int] | None = None
         self.load(force=True)
 
     def load(self, force: bool = False) -> bool:
@@ -89,6 +103,18 @@ class ZoneConfig:
             else None
         )
         self.expansion_px = float(data.get("expansion_px", DEFAULT_EXPANSION_PX))
+        self.ground_source = str(data.get("ground_source") or "off")
+        if self.ground_source not in {"off", "camera", "points"}:
+            self.ground_source = "camera" if self.homography is not None else "off"
+        if self.homography is not None and self.ground_source == "off":
+            self.ground_source = "points"
+        self.camera_height_m = float(data.get("camera_height_m", DEFAULT_HEIGHT_M))
+        self.pitch_deg = float(data.get("pitch_deg", DEFAULT_PITCH_DEG))
+        self.hfov_deg = float(data.get("hfov_deg", DEFAULT_HFOV_DEG))
+        self.roll_deg = float(data.get("roll_deg", DEFAULT_ROLL_DEG))
+        self._mapped_size = None
+        self._cached_mask = None
+        self._cached_mask_key = None
 
     def save(self) -> None:
         try:
@@ -103,6 +129,11 @@ class ZoneConfig:
                     if self.ground_polygon is not None
                     else None
                 ),
+                "ground_source": self.ground_source,
+                "camera_height_m": float(self.camera_height_m),
+                "pitch_deg": float(self.pitch_deg),
+                "hfov_deg": float(self.hfov_deg),
+                "roll_deg": float(self.roll_deg),
                 "expansion_px": float(self.expansion_px),
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
@@ -123,6 +154,92 @@ class ZoneConfig:
     def uses_ground_plane(self) -> bool:
         return self.homography is not None and self.ground_polygon is not None
 
+    def overlay_polygon(self, width: int, height: int) -> np.ndarray:
+        """监控叠加用多边形：地面 3D 时反投地面区域，否则用画面多边形。"""
+        self.ensure_ground_mapping(width, height)
+        if self.uses_ground_plane:
+            projected = self._ground_polygon_in_image()
+            if projected is not None:
+                return projected.astype(np.float32)
+        return self.image_polygon(width, height)
+
+    def enable_camera_ground(self, width: int, height: int) -> bool:
+        self.ground_source = "camera"
+        return self.ensure_ground_mapping(width, height, force=True)
+
+    def enable_point_ground(
+        self, homography: np.ndarray, width: int, height: int
+    ) -> bool:
+        matrix = np.asarray(homography, dtype=np.float64)
+        if matrix.shape != HOMOGRAPHY_SHAPE:
+            return False
+        self.ground_source = "points"
+        self.homography = matrix
+        self._mapped_size = (int(width), int(height))
+        return self._refresh_ground_polygon(width, height)
+
+    def disable_ground_3d(self) -> None:
+        self.ground_source = "off"
+        self.homography = None
+        self.ground_polygon = None
+        self._mapped_size = None
+        self._cached_mask = None
+        self._cached_mask_key = None
+
+    def ensure_ground_mapping(
+        self, width: int, height: int, force: bool = False
+    ) -> bool:
+        """按当前分辨率刷新单应。相机几何模式会重算 H，使不同画幅仍用同一套米制区域。"""
+        size = (int(width), int(height))
+        if (
+            not force
+            and self._mapped_size == size
+            and self.homography is not None
+            and self.ground_polygon is not None
+        ):
+            return True
+        if self.ground_source == "off":
+            return False
+        if self.ground_source == "camera":
+            try:
+                self.homography = image_to_ground_homography(
+                    size[0],
+                    size[1],
+                    self.camera_height_m,
+                    self.pitch_deg,
+                    self.hfov_deg,
+                    self.roll_deg,
+                )
+            except (np.linalg.LinAlgError, ValueError, ZeroDivisionError):
+                logger.warning("camera ground homography failed")
+                return False
+            self._mapped_size = size
+            self._cached_mask = None
+            self._cached_mask_key = None
+            return self._refresh_ground_polygon(size[0], size[1])
+        if self.homography is None:
+            return False
+        self._mapped_size = size
+        if force or self.ground_polygon is None:
+            self._cached_mask = None
+            self._cached_mask_key = None
+            return self._refresh_ground_polygon(size[0], size[1])
+        return True
+
+    def _refresh_ground_polygon(self, width: int, height: int) -> bool:
+        if self.homography is None:
+            self.ground_polygon = None
+            return False
+        pixels = self.image_polygon(width, height)
+        ground = project_pixels_to_ground(self.homography, pixels)
+        if not np.isfinite(ground).all() or len(ground) < MIN_POLYGON_POINTS:
+            logger.warning(
+                "zone polygon crosses the horizon; keep previous ground poly"
+            )
+            return self.ground_polygon is not None
+        self.ground_polygon = ground
+        return True
+
     def _mask_key(self, width: int, height: int) -> tuple:
         return (
             int(width),
@@ -138,6 +255,7 @@ class ZoneConfig:
         当前分辨率下的警戒区掩码（非零即区内），配置或尺寸变化时才重建。
         地面多边形跨过地平线、无法映射回图像多边形时返回 None，改走逐点投影。
         """
+        self.ensure_ground_mapping(width, height)
         key = self._mask_key(width, height)
         if key != self._cached_mask_key:
             self._cached_mask = self._build_mask(int(width), int(height))
@@ -168,6 +286,8 @@ class ZoneConfig:
 
     def _ground_polygon_in_image(self) -> np.ndarray | None:
         """地面多边形经单应逆变换回图像；所有顶点在地平线同侧时映射保持为多边形。"""
+        if self.homography is None or self.ground_polygon is None:
+            return None
         try:
             inverse = np.linalg.inv(self.homography)
         except np.linalg.LinAlgError:
@@ -180,7 +300,7 @@ class ZoneConfig:
         if not (np.all(scale > 0) or np.all(scale < 0)):
             return None
         image = homogeneous[:, :2] / scale[:, None]
-        if np.abs(image).max() > MAX_PROJECTED_COORD:
+        if not np.isfinite(image).all() or np.abs(image).max() > MAX_PROJECTED_COORD:
             return None
         return np.rint(image).astype(np.int32)
 
